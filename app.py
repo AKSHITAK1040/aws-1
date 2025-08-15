@@ -1,81 +1,59 @@
 import streamlit as st
-import cv2
-import numpy as np
-import tensorflow as tf
 from PIL import Image
-import json
+import numpy as np
+import cv2
+from ultralytics import YOLO
 
-# Load model and class mapping
-model = tf.keras.models.load_model('ethnicity_classification_mobilenetv2.h5')
-with open('class_indices.json', 'r') as f:
-    class_indices = json.load(f)
-reverse_class_indices = {v: k for k, v in class_indices.items()}
+# Set the path to your Haar cascade file (ensure the .xml is in your working directory)
+CASCADE_PATH = "haarcascade_frontalface_default.xml"
 
-# Load Haar Cascade for face detection
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+st.title(" Ethnicity Prediction")
 
-def preprocess_face(frame, img_size=(128,128)):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, 1.3, 5)
-    if len(faces) > 0:
-        x, y, w, h = faces[0]
-        face = frame[y:y+h, x:x+w]
+# Load the face detector safely
+face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
+if face_cascade.empty():
+    st.error("Failed to load Haar cascade. Ensure haarcascade_frontalface_default.xml is in your directory.")
+    st.stop()
+
+# Load your YOLOv8 ethnicity model
+model = YOLO('Race-CLS-FairFace_yolo11l.pt')  # Rename for your specific file
+
+# Use Streamlit camera input for live photo capture
+capture = st.camera_input("Take a photo")
+
+if capture is not None:
+    image = Image.open(capture)
+    st.image(image, caption="Captured Image", use_column_width=True)
+
+    st.write("Focusing on the largest face...")
+    img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    faces = face_cascade.detectMultiScale(img_cv, scaleFactor=1.1, minNeighbors=5)
+
+    if len(faces) == 0:
+        st.error("No face detected in the photo. Please try again.")
     else:
-        face = frame
-    img = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-    img = cv2.resize(img, img_size)
-    arr = np.array(img) / 255.0
-    return np.expand_dims(arr, axis=0)
+        # Ensure output is always a list of rectangles
+        faces = np.array(faces)
+        if faces.ndim == 1 and faces.shape[0] == 4:
+            faces = faces.reshape(1, 4)
 
-# Page configuration
-st.set_page_config(page_title="Ethnicity Predictor", layout="wide")
+        # Select the largest face
+        (x, y, w, h) = sorted(faces, key=lambda b: b[2]*b[3], reverse=True)[0]
+        face_img = img_cv[y:y+h, x:x+w]
 
-# Custom UI with title and description
-st.markdown("<h1 style='text-align: center; color: #4B0082;'>Ethnicity Predictor</h1>", unsafe_allow_html=True)
-st.markdown("<h4 style='text-align: center; color: #6A5ACD;'>Predict your ethnicity using your webcam</h4>", unsafe_allow_html=True)
-st.write("---")
+        # Convert cropped face to PIL for YOLO
+        face_img_pil = Image.fromarray(cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB))
+        st.image(face_img_pil, caption="Focused Face", use_column_width=True)
 
-# Create columns for camera and prediction
-col1, col2 = st.columns([1,1])
+        # Ethnicity classification
+        st.write("Predicting ethnicity...")
+        results = model(face_img_pil)
+        st.write(results[0].probs.data)  # Probabilities per class
 
-with col1:
-    st.subheader("📸 Capture Your Face")
-    uploaded_image = st.camera_input("Take a picture")
-    
-with col2:
-    st.subheader("📝 Prediction Result")
-    result_container = st.empty()  # placeholder for prediction results
-
-if uploaded_image is not None:
-    # Convert PIL RGB image to OpenCV BGR
-    image = np.array(Image.open(uploaded_image))
-    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-
-    # Preprocess and predict
-    input_data = preprocess_face(image)
-    pred = model.predict(input_data)
-    pred_class = np.argmax(pred, axis=1)[0]
-    pred_label = reverse_class_indices[pred_class]
-
-    # Draw rectangle if face detected
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, 1.3, 5)
-    if len(faces) > 0:
-        x, y, w, h = faces[0]
-        cv2.rectangle(image, (x, y), (x+w, y+h), (0, 255, 0), 2)
-        cv2.putText(image, f'{pred_label}', (x, y-10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2, cv2.LINE_AA)
-    else:
-        cv2.putText(image, f'{pred_label}', (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2, cv2.LINE_AA)
-
-    # Display the image with prediction
-    col1.image(cv2.cvtColor(image, cv2.COLOR_BGR2RGB), use_column_width=True)
-
-    # Show prediction info
-    with col2:
-        st.success(f"Predicted Ethnicity: **{pred_label}**")
-        st.progress(min(int(np.max(pred)*100), 100))  # show confidence as progress bar
-        st.write("Confidence Scores:")
-        for idx, score in enumerate(pred[0]):
-            st.write(f"- {reverse_class_indices[idx]}: {score:.2f}")
+        class_names = [
+            'Black', 'East Asian', 'Indian', 'Latino_Hispanic',
+            'Middle Eastern', 'Southeast Asian', 'White'
+        ]
+        top_class_idx = int(results[0].probs.top1)
+        top_class = class_names[top_class_idx]
+        st.success(f"Predicted Ethnicity: {top_class}")
